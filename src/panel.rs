@@ -12,8 +12,6 @@ pub struct Tab {
     pub title: String,
     pub terminal: Arc<Mutex<Terminal>>,
     pub pty: Option<Arc<PtyProcess>>,
-    pub search_mode: bool,
-    pub search_query: String,
     pub selecting: bool,
     pub working_directory: Option<String>,
     pub process_exited: bool,
@@ -68,8 +66,6 @@ impl Tab {
             title,
             terminal,
             pty,
-            search_mode: false,
-            search_query: String::new(),
             selecting: false,
             working_directory: None,
             process_exited: false,
@@ -92,25 +88,10 @@ impl Tab {
     }
 }
 
-/// Panel with tabs and optional split
+/// Panel with tabs
 pub struct Panel {
     pub tabs: Vec<Tab>,
     pub active_index: usize,
-    pub split: Option<SplitPanel>,
-}
-
-/// Split panel configuration
-pub struct SplitPanel {
-    pub first: Box<Panel>,
-    pub second: Box<Panel>,
-    pub active_side: SplitSide,
-}
-
-/// Which side of the split is active
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SplitSide {
-    First,
-    Second,
 }
 
 impl Panel {
@@ -118,7 +99,6 @@ impl Panel {
         Self {
             tabs: Vec::new(),
             active_index: 0,
-            split: None,
         }
     }
 
@@ -127,101 +107,11 @@ impl Panel {
         self.active_index = self.tabs.len() - 1;
     }
 
-    pub fn remove_tab(&mut self, index: usize) {
-        if self.tabs.len() <= 1 {
-            return; // Keep at least one tab
-        }
-        self.tabs.remove(index);
-        if self.active_index >= self.tabs.len() {
-            self.active_index = self.tabs.len() - 1;
-        }
-    }
-
     pub fn active_tab(&self) -> Option<&Tab> {
-        if let Some(ref split) = self.split {
-            match split.active_side {
-                SplitSide::First => split.first.active_tab(),
-                SplitSide::Second => split.second.active_tab(),
-            }
-        } else {
-            self.tabs.get(self.active_index)
-        }
+        self.tabs.get(self.active_index)
     }
 
     pub fn active_tab_mut(&mut self) -> Option<&mut Tab> {
-        if let Some(ref mut split) = self.split {
-            match split.active_side {
-                SplitSide::First => split.first.active_tab_mut(),
-                SplitSide::Second => split.second.active_tab_mut(),
-            }
-        } else {
-            self.tabs.get_mut(self.active_index)
-        }
-    }
-
-    /// Split the panel horizontally (top/bottom)
-    pub fn split_horizontal(&mut self) {
-        if self.tabs.is_empty() {
-            return;
-        }
-
-        let active_tab = self.tabs.remove(self.active_index);
-        let new_tab = Tab::new(format!("Terminal {}", self.tabs.len() + 2));
-
-        let mut first = Panel::new();
-        first.add_tab(active_tab);
-
-        let mut second = Panel::new();
-        second.add_tab(new_tab);
-
-        self.split = Some(SplitPanel {
-            first: Box::new(first),
-            second: Box::new(second),
-            active_side: SplitSide::First,
-        });
-    }
-
-    /// Split the panel vertically (left/right)
-    pub fn split_vertical(&mut self) {
-        if self.tabs.is_empty() {
-            return;
-        }
-
-        let active_tab = self.tabs.remove(self.active_index);
-        let new_tab = Tab::new(format!("Terminal {}", self.tabs.len() + 2));
-
-        let mut first = Panel::new();
-        first.add_tab(active_tab);
-
-        let mut second = Panel::new();
-        second.add_tab(new_tab);
-
-        self.split = Some(SplitPanel {
-            first: Box::new(first),
-            second: Box::new(second),
-            active_side: SplitSide::First,
-        });
-    }
-
-    /// Close the split and merge back to single panel
-    pub fn close_split(&mut self) {
-        if let Some(split) = self.split.take() {
-            // Merge all tabs from both sides
-            let mut all_tabs = Vec::new();
-            all_tabs.extend(split.first.tabs);
-            all_tabs.extend(split.second.tabs);
-
-            if all_tabs.is_empty() {
-                all_tabs.push(Tab::new("Terminal 1".to_string()));
-            }
-
-            self.tabs = all_tabs;
-            self.active_index = 0;
-        }
-    }
-
-    /// Check if panel has a split
-    pub fn has_split(&self) -> bool {
-        self.split.is_some()
+        self.tabs.get_mut(self.active_index)
     }
 }

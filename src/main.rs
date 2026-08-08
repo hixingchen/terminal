@@ -334,52 +334,6 @@ impl TerminalApp {
         let tab_states = self.panel.tabs.iter().map(|t| t.to_state()).collect();
         self.session_manager.save_session(tab_states);
     }
-
-    fn render_search_bar(&mut self, ui: &mut egui::Ui) {
-        let (match_info, query) = if let Some(tab) = self.panel.active_tab() {
-            let term = tab.terminal.lock().unwrap();
-            let matches = term.get_search_matches();
-            let active = term.get_active_match();
-            let info = if matches.is_empty() {
-                "No matches".to_string()
-            } else {
-                format!("{}/{}", active.map(|a| matches.iter().position(|m| m.start == a.start).unwrap_or(0) + 1).unwrap_or(1), matches.len())
-            };
-            (info, tab.search_query.clone())
-        } else {
-            return;
-        };
-
-        let mut query = query;
-        ui.horizontal(|ui| {
-            ui.label("🔍");
-            let response = ui.text_edit_singleline(&mut query);
-            if response.changed() {
-                if let Some(tab) = self.panel.active_tab_mut() {
-                    tab.search_query = query.clone();
-                    tab.terminal.lock().unwrap().search(&query);
-                }
-            }
-            ui.label(&match_info);
-            if ui.button("⬆").clicked() {
-                if let Some(tab) = self.panel.active_tab_mut() {
-                    tab.terminal.lock().unwrap().prev_match();
-                }
-            }
-            if ui.button("⬇").clicked() {
-                if let Some(tab) = self.panel.active_tab_mut() {
-                    tab.terminal.lock().unwrap().next_match();
-                }
-            }
-            if ui.button("✕").clicked() {
-                if let Some(tab) = self.panel.active_tab_mut() {
-                    tab.search_mode = false;
-                    tab.search_query.clear();
-                    tab.terminal.lock().unwrap().clear_search();
-                }
-            }
-        });
-    }
 }
 
 impl eframe::App for TerminalApp {
@@ -420,30 +374,13 @@ impl eframe::App for TerminalApp {
 
         // Collect input events
         let mut events = Vec::new();
-        let mut copy = false;
         let mut paste = false;
-        let mut search = false;
-        let mut new_tab = false;
-        let mut close_tab = false;
-        let mut split_h = false;
-        let mut split_v = false;
-        let mut close_split = false;
-        let mut font_increase = false;
-        let mut font_decrease = false;
 
         ctx.input(|i| {
-            if i.modifiers.ctrl && i.modifiers.shift {
-                if i.key_pressed(egui::Key::C) { copy = true; }
-                if i.key_pressed(egui::Key::V) { paste = true; }
-                if i.key_pressed(egui::Key::F) { search = true; }
-                if i.key_pressed(egui::Key::T) { new_tab = true; }
-                if i.key_pressed(egui::Key::W) { close_tab = true; }
-                if i.key_pressed(egui::Key::Backslash) { split_h = true; }
-                if i.key_pressed(egui::Key::Slash) { split_v = true; }
-                if i.key_pressed(egui::Key::X) { close_split = true; }
+            // Ctrl+V — paste
+            if i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::V) {
+                paste = true;
             }
-            if i.modifiers.ctrl && i.key_pressed(egui::Key::Equals) { font_increase = true; }
-            if i.modifiers.ctrl && i.key_pressed(egui::Key::Minus) { font_decrease = true; }
             // F1 key - no action (removed help)
 
             // Handle IME and text events
@@ -519,93 +456,20 @@ impl eframe::App for TerminalApp {
             }
         });
 
-        if copy { self.copy_selection(); }
         if paste { self.paste_clipboard(); }
-        if search {
-            if let Some(tab) = self.panel.active_tab_mut() {
-                tab.search_mode = true;
-                tab.search_query.clear();
-            }
-        }
-        if new_tab {
-            let new_idx = self.panel.tabs.len() + 1;
-            self.panel.add_tab(Tab::new(format!("Terminal {}", new_idx)));
-        }
-        if close_tab {
-            self.panel.remove_tab(self.panel.active_index);
-        }
-        if split_h { self.panel.split_horizontal(); }
-        if split_v { self.panel.split_vertical(); }
-        if close_split { self.panel.close_split(); }
-        if font_increase { self.font_size = (self.font_size + 1.0).min(32.0); }
-        if font_decrease { self.font_size = (self.font_size - 1.0).max(8.0); }
+        self.process_input_events(events);
 
-        // Process search mode input
-        let search_mode = self.panel.active_tab().map_or(false, |t| t.search_mode);
-        if search_mode {
-            for event in events {
-                match event {
-                    InputEvent::Key { key, modifiers } => {
-                        match key {
-                            egui::Key::Escape => {
-                                if let Some(tab) = self.panel.active_tab_mut() {
-                                    tab.search_mode = false;
-                                    tab.search_query.clear();
-                                    tab.terminal.lock().unwrap().clear_search();
-                                }
-                            }
-                            egui::Key::Enter => {
-                                if let Some(tab) = self.panel.active_tab_mut() {
-                                    if modifiers.shift { tab.terminal.lock().unwrap().prev_match(); }
-                                    else { tab.terminal.lock().unwrap().next_match(); }
-                                }
-                            }
-                            egui::Key::Backspace => {
-                                if let Some(tab) = self.panel.active_tab_mut() {
-                                    tab.search_query.pop();
-                                    if tab.search_query.is_empty() { tab.terminal.lock().unwrap().clear_search(); }
-                                    else { tab.terminal.lock().unwrap().search(&tab.search_query); }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    InputEvent::Text(text) | InputEvent::Ime(text) => {
-                        if let Some(tab) = self.panel.active_tab_mut() {
-                            tab.search_query.push_str(&text);
-                            tab.terminal.lock().unwrap().search(&tab.search_query);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        } else {
-            self.process_input_events(events);
-        }
-
-        // Search bar (only show when searching)
-        let search_mode = self.panel.active_tab().map_or(false, |t| t.search_mode);
-        if search_mode {
-            egui::TopBottomPanel::top("search_bar").show(ctx, |ui| {
-                self.render_search_bar(ui);
-            });
-        }
-
-        // Minimal status bar - only show when needed
-        let (show_status, search_mode, search_query, process_exited, title) =
+        // Minimal status bar - only show when process exited
+        let (show_status, process_exited, title) =
             if let Some(tab) = self.panel.active_tab() {
-                (tab.search_mode || tab.process_exited || self.panel.has_split(),
-                 tab.search_mode, tab.search_query.clone(), tab.process_exited, tab.title.clone())
+                (tab.process_exited, tab.process_exited, tab.title.clone())
             } else {
-                (false, false, String::new(), false, String::new())
+                (false, false, String::new())
             };
 
         if show_status {
             egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    if search_mode {
-                        ui.colored_label(egui::Color32::from_rgb(100, 200, 100), format!("Search: {}", search_query));
-                    }
                     if process_exited {
                         ui.colored_label(egui::Color32::from_rgb(255, 100, 100), "Process Exited");
                         if ui.button("Restart").clicked() {
@@ -661,13 +525,6 @@ impl eframe::App for TerminalApp {
             // Batch rendering: group cells by line and render with LayoutJob
             use egui::text::{LayoutJob, LayoutSection};
             use egui::{TextFormat, FontId, Color32};
-
-            let (search_matches, active_match) = if let Some(tab) = self.panel.active_tab() {
-                let term = tab.terminal.lock().unwrap();
-                (term.get_search_matches().to_vec(), term.get_active_match().cloned())
-            } else {
-                (Vec::new(), None)
-            };
 
             // Group cells by line (sorted Vec instead of HashMap — cells are already
             // ordered by line, so we can partition in one pass).
@@ -725,11 +582,9 @@ impl eframe::App for TerminalApp {
                     }
 
                     let is_selected = content.selection.as_ref().map_or(false, |sel| cell.point >= sel.start && cell.point <= sel.end);
-                    let is_search_match = search_matches.iter().any(|m| cell.point >= m.start && cell.point <= m.end);
-                    let is_active_match = active_match.as_ref().map_or(false, |m| cell.point >= m.start && cell.point <= m.end);
                     let is_hyperlink = cell.cell.hyperlink.is_some();
 
-                    let (fg, bg) = self.cell_color(&cell.cell, is_selected, is_search_match, is_active_match, is_hyperlink);
+                    let (fg, bg) = self.cell_color(&cell.cell, is_selected, false, false, is_hyperlink);
 
                     // Draw background if needed
                     let x = origin.x + col as f32 * self.cell_width;

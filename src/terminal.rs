@@ -233,10 +233,8 @@ pub enum SelectionType { Simple, Semantic, Lines }
 /// Selection state
 #[derive(Debug, Clone)]
 pub struct Selection {
-    pub ty: SelectionType,
     pub start: Point,
     pub end: Point,
-    pub head: Point,
 }
 
 /// Selection range
@@ -245,7 +243,6 @@ pub struct Selection {
 pub struct SelectionRange {
     pub start: Point,
     pub end: Point,
-    pub is_block: bool,
 }
 
 /// Terminal modes
@@ -265,13 +262,6 @@ impl Modes {
     pub fn insert(&mut self, other: Self) { self.0 |= other.0; }
 }
 
-/// Search match
-#[derive(Debug, Clone)]
-pub struct SearchMatch {
-    pub start: Point,
-    pub end: Point,
-}
-
 /// Terminal content snapshot
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -282,7 +272,6 @@ pub struct Content {
     pub display_offset: usize,
     pub selection: Option<SelectionRange>,
     pub selection_text: Option<String>,
-    pub title: String,
 }
 
 impl Default for Content {
@@ -294,7 +283,6 @@ impl Default for Content {
             display_offset: 0,
             selection: None,
             selection_text: None,
-            title: "Terminal".to_string(),
         }
     }
 }
@@ -338,10 +326,6 @@ pub struct Terminal {
     last_content: Content,
     bounds: TerminalBounds,
     selection: Option<Selection>,
-    search_query: Option<String>,
-    search_matches: Vec<SearchMatch>,
-    active_match_index: Option<usize>,
-    compiled_search: Option<Regex>,
     url_regex: Regex,
     path_regex: Regex,
     /// Set once the cursor has reached the bottom row at least once,
@@ -366,10 +350,6 @@ impl Terminal {
             last_content: Content::default(),
             bounds,
             selection: None,
-            search_query: None,
-            search_matches: Vec::new(),
-            active_match_index: None,
-            compiled_search: None,
             url_regex: Regex::new(r#"https?://[^\s<>\"{}|\\^`\[\]]+"#).unwrap(),
             path_regex: Regex::new(r#"([a-zA-Z]:\\[^\s<>:"|?*]+|/[^\s<>:"|?*]+\.\w+)(?::(\d+))?(?::(\d+))?"#).unwrap(),
             scrollback_ready: false,
@@ -485,7 +465,7 @@ impl Terminal {
 
         let selection_range = self.selection.as_ref().map(|sel| {
             let (start, end) = if sel.start <= sel.end { (sel.start, sel.end) } else { (sel.end, sel.start) };
-            SelectionRange { start, end, is_block: sel.ty == SelectionType::Lines }
+            SelectionRange { start, end }
         });
 
         let selection_text = selection_range.as_ref().map(|range| {
@@ -499,7 +479,6 @@ impl Terminal {
             cells, mode: modes, cursor,
             display_offset: content.display_offset,
             selection: selection_range, selection_text,
-            title: "Terminal".to_string(),
         };
     }
 
@@ -514,11 +493,6 @@ impl Terminal {
         self.update_content();
     }
 
-    pub fn scroll_down(&mut self, lines: i32) {
-        { let mut term = self.term.lock(); term.scroll_display(Scroll::Delta(-lines)); }
-        self.update_content();
-    }
-
     pub fn resize(&mut self, bounds: TerminalBounds) {
         self.bounds = bounds;
         let dimensions = TermDimensions { columns: bounds.num_columns(), screen_lines: bounds.num_lines() };
@@ -526,16 +500,14 @@ impl Terminal {
         self.update_content();
     }
 
-    pub fn start_selection(&mut self, point: Point, ty: SelectionType) {
-        match ty {
+    pub fn start_selection(&mut self, point: Point, _ty: SelectionType) {
+        match _ty {
             SelectionType::Semantic => {
                 // Word boundary selection (double-click)
                 let (start, end) = self.find_word_boundaries(point);
                 self.selection = Some(Selection {
-                    ty,
                     start,
                     end,
-                    head: end,
                 });
             }
             SelectionType::Lines => {
@@ -552,14 +524,12 @@ impl Terminal {
                     .map(|c| c.point.column)
                     .unwrap_or(0);
                 self.selection = Some(Selection {
-                    ty,
                     start: Point::new(line, first_col),
                     end: Point::new(line, last_col),
-                    head: Point::new(line, last_col),
                 });
             }
             _ => {
-                self.selection = Some(Selection { ty, start: point, end: point, head: point });
+                self.selection = Some(Selection { start: point, end: point });
             }
         }
         self.update_content();
@@ -621,7 +591,7 @@ impl Terminal {
     }
 
     pub fn update_selection(&mut self, point: Point) {
-        if let Some(ref mut sel) = self.selection { sel.end = point; sel.head = point; }
+        if let Some(ref mut sel) = self.selection { sel.end = point; }
         self.update_content();
     }
 
@@ -632,101 +602,6 @@ impl Terminal {
 
     pub fn copy_selection(&self) -> Option<String> {
         self.last_content.selection_text.clone()
-    }
-
-    pub fn search(&mut self, query: &str) {
-        self.search_query = Some(query.to_string());
-        self.search_matches.clear();
-        self.active_match_index = None;
-
-        // Compile regex once, reuse across all lines
-        let re = match Regex::new(query) {
-            Ok(re) => re,
-            Err(_) => { self.compiled_search = None; return; }
-        };
-
-        // Clone content to avoid borrow conflict
-        let content = self.last_content.clone();
-        let mut current_line = String::new();
-        let mut line_start = Point::new(0, 0);
-
-        for cell in &content.cells {
-            if cell.point.line != line_start.line {
-                Self::search_line_static(&re, &current_line, line_start, &mut self.search_matches);
-                current_line.clear();
-                line_start = cell.point;
-            }
-            current_line.push(cell.cell.character);
-        }
-        Self::search_line_static(&re, &current_line, line_start, &mut self.search_matches);
-
-        self.compiled_search = Some(re);
-
-        if !self.search_matches.is_empty() {
-            self.active_match_index = Some(0);
-        }
-    }
-
-    fn search_line_static(re: &Regex, line: &str, start: Point, matches: &mut Vec<SearchMatch>) {
-        for mat in re.find_iter(line) {
-            matches.push(SearchMatch {
-                start: Point::new(start.line, start.column + mat.start()),
-                end: Point::new(start.line, start.column + mat.end() - 1),
-            });
-        }
-    }
-
-    pub fn clear_search(&mut self) {
-        self.search_query = None;
-        self.search_matches.clear();
-        self.active_match_index = None;
-        self.compiled_search = None;
-    }
-
-    pub fn next_match(&mut self) {
-        if let Some(idx) = self.active_match_index {
-            if !self.search_matches.is_empty() {
-                self.active_match_index = Some((idx + 1) % self.search_matches.len());
-                self.scroll_to_active_match();
-            }
-        }
-    }
-
-    pub fn prev_match(&mut self) {
-        if let Some(idx) = self.active_match_index {
-            if !self.search_matches.is_empty() {
-                self.active_match_index = Some((idx + self.search_matches.len() - 1) % self.search_matches.len());
-                self.scroll_to_active_match();
-            }
-        }
-    }
-
-    /// Scroll to make the active search match visible
-    fn scroll_to_active_match(&mut self) {
-        if let Some(active_match) = self.get_active_match().cloned() {
-            let content = self.get_content();
-            let display_offset = content.display_offset as i32;
-            let screen_lines = self.bounds.num_lines() as i32;
-
-            // Calculate the match line in viewport coordinates
-            let match_line = active_match.start.line + display_offset;
-
-            // If match is above viewport, scroll up
-            if match_line < 0 {
-                let scroll_amount = -match_line;
-                self.scroll_up(scroll_amount);
-            }
-            // If match is below viewport, scroll down
-            else if match_line >= screen_lines {
-                let scroll_amount = match_line - screen_lines + 1;
-                self.scroll_down(scroll_amount);
-            }
-        }
-    }
-
-    pub fn get_search_matches(&self) -> &[SearchMatch] { &self.search_matches }
-    pub fn get_active_match(&self) -> Option<&SearchMatch> {
-        self.active_match_index.and_then(|idx| self.search_matches.get(idx))
     }
 
     /// Total lines in the grid (visible + scrollback history).

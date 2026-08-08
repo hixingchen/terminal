@@ -35,7 +35,6 @@ impl Default for ThemeConfig {
 }
 
 /// Runtime theme with egui colors
-#[allow(dead_code)]
 pub struct Theme {
     pub bg: egui::Color32,
     pub fg: egui::Color32,
@@ -45,10 +44,8 @@ pub struct Theme {
     pub search_match: egui::Color32,
     pub search_active: egui::Color32,
     pub hyperlink: egui::Color32,
-    config: ThemeConfig,
 }
 
-#[allow(dead_code)]
 impl Theme {
     pub fn from_config(config: ThemeConfig) -> Self {
         Self {
@@ -60,7 +57,6 @@ impl Theme {
             search_match: egui::Color32::from_rgba_premultiplied(config.search_match.0, config.search_match.1, config.search_match.2, config.search_match.3),
             search_active: egui::Color32::from_rgba_premultiplied(config.search_active.0, config.search_active.1, config.search_active.2, config.search_active.3),
             hyperlink: egui::Color32::from_rgb(config.hyperlink.0, config.hyperlink.1, config.hyperlink.2),
-            config,
         }
     }
 
@@ -80,17 +76,6 @@ impl Theme {
             ThemeConfig::default()
         };
         Self::from_config(config)
-    }
-
-    pub fn save(&self) {
-        if let Some(config_dir) = dirs::config_dir() {
-            let dir = config_dir.join("terminal");
-            let _ = std::fs::create_dir_all(&dir);
-            let theme_path = dir.join("theme.json");
-            if let Ok(content) = serde_json::to_string_pretty(&self.config) {
-                let _ = std::fs::write(theme_path, content);
-            }
-        }
     }
 
     pub fn color_to_egui(&self, color: AnsiColor, is_foreground: bool) -> egui::Color32 {

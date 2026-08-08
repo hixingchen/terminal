@@ -20,13 +20,7 @@ pub struct PtyProcess {
     reader: Arc<Mutex<Box<dyn Read + Send>>>,
 }
 
-#[allow(dead_code)]
 impl PtyProcess {
-    /// Create a new PTY process with a shell
-    pub fn new(cols: u16, rows: u16) -> Result<Self> {
-        Self::new_with_cwd(cols, rows, None)
-    }
-
     /// Create a new PTY process with a shell and optional working directory
     pub fn new_with_cwd(cols: u16, rows: u16, working_dir: Option<String>) -> Result<Self> {
         let pty_system = native_pty_system();
@@ -103,21 +97,6 @@ impl PtyProcess {
             pixel_height: 0,
         })?;
         Ok(())
-    }
-
-    /// Check if child process is still running
-    pub fn is_running(&self) -> bool {
-        let mut child = self.child.lock().unwrap();
-        child.try_wait().unwrap_or(None).is_none()
-    }
-
-    /// Get exit status if process has exited
-    pub fn exit_status(&self) -> Option<i32> {
-        let mut child = self.child.lock().unwrap();
-        match child.try_wait() {
-            Ok(Some(status)) => Some(status.exit_code() as i32),
-            _ => None,
-        }
     }
 }
 

@@ -30,12 +30,10 @@ impl Default for SessionState {
 }
 
 /// Session manager for persistence
-#[allow(dead_code)]
 pub struct SessionManager {
     session_path: PathBuf,
 }
 
-#[allow(dead_code)]
 impl SessionManager {
     pub fn new() -> Self {
         let session_path = if let Some(config_dir) = dirs::config_dir() {
@@ -70,9 +68,5 @@ impl SessionManager {
 
         let content = std::fs::read_to_string(&self.session_path).ok()?;
         serde_json::from_str(&content).ok()
-    }
-
-    pub fn clear_session(&self) {
-        let _ = std::fs::remove_file(&self.session_path);
     }
 }

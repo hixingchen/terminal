@@ -12,8 +12,6 @@ eframe = { version = "0.29", features = ["wgpu"] }
 egui = "0.29"
 # PTY support
 portable-pty = "0.8"
-# Async runtime
-tokio = { version = "1", features = ["full"] }
 # Error handling
 anyhow = "1"
 # Logging
@@ -21,8 +19,6 @@ log = "0.4"
 env_logger = "0.11"
 # Regex
 regex = "1"
-# Process info
-sysinfo = "0.31"
 # Clipboard
 arboard = "3"
 # Serialization
