@@ -198,8 +198,9 @@ impl TerminalApp {
         let y = pos.y - origin.y;
         // Rendering uses y = origin.y + (grid_line + display_offset) * cell_height,
         // so reverse: grid_line = (y / cell_height) - display_offset.
+        // Line can be negative when scrolled back into history.
         let line = (y / self.cell_height) as i32 - display_offset as i32;
-        Point::new(line.max(0), (x / self.cell_width).max(0.0) as usize)
+        Point::new(line, (x / self.cell_width).max(0.0) as usize)
     }
 
     fn cell_color(&self, cell: &Cell, is_selected: bool, is_search_match: bool, is_active_match: bool, is_hyperlink: bool) -> (egui::Color32, egui::Color32) {
