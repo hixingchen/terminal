@@ -53,11 +53,21 @@ impl SessionManager {
         };
 
         if let Some(parent) = self.session_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                log::warn!("Failed to create session directory: {}", e);
+                return;
+            }
         }
 
-        if let Ok(content) = serde_json::to_string_pretty(&session) {
-            let _ = std::fs::write(&self.session_path, content);
+        match serde_json::to_string_pretty(&session) {
+            Ok(content) => {
+                if let Err(e) = std::fs::write(&self.session_path, content) {
+                    log::warn!("Failed to save session: {}", e);
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to serialize session: {}", e);
+            }
         }
     }
 

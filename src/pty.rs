@@ -74,7 +74,7 @@ impl PtyProcess {
 
     /// Write data to PTY (send to shell)
     pub fn write(&self, data: &[u8]) -> Result<()> {
-        let mut writer = self.writer.lock().unwrap();
+        let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         writer.write_all(data)?;
         writer.flush()?;
         Ok(())
@@ -89,7 +89,7 @@ impl PtyProcess {
 
     /// Resize the PTY
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
-        let pty = self.pty.lock().unwrap();
+        let pty = self.pty.lock().unwrap_or_else(|e| e.into_inner());
         pty.master.resize(PtySize {
             rows,
             cols,
@@ -102,9 +102,11 @@ impl PtyProcess {
 
 impl Drop for PtyProcess {
     fn drop(&mut self) {
-        // Kill child process on drop
-        let mut child = self.child.lock().unwrap();
+        // Kill child process on drop. Use unwrap_or_else to handle poisoned mutex
+        // (panicking in Drop during unwinding would abort the process).
+        let mut child = self.child.lock().unwrap_or_else(|e| e.into_inner());
         let _ = child.kill();
+        let _ = child.wait();
     }
 }
 
@@ -116,7 +118,7 @@ pub struct PtyReader {
 impl PtyReader {
     /// Read from PTY (blocking)
     pub fn read(&self, buf: &mut [u8]) -> Result<usize> {
-        let mut reader = self.reader.lock().unwrap();
+        let mut reader = self.reader.lock().unwrap_or_else(|e| e.into_inner());
         Ok(reader.read(buf)?)
     }
 }

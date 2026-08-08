@@ -8,7 +8,19 @@ use alacritty_terminal::{
     vte::ansi::{Color, Processor, StdSyncHandler},
 };
 use regex::Regex;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+/// Pre-compiled URL regex (compiled once, shared across all Terminal instances)
+fn url_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"https?://[^\s<>\"{}|\\^`\[\]]+"#).unwrap())
+}
+
+/// Pre-compiled path regex (compiled once, shared across all Terminal instances)
+fn path_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"([a-zA-Z]:\\[^\s<>:"|?*]+|/[^\s<>:"|?*]+\.\w+)(?::(\d+))?(?::(\d+))?"#).unwrap())
+}
 
 /// Terminal bounds
 #[derive(Debug, Clone, Copy)]
@@ -326,8 +338,6 @@ pub struct Terminal {
     last_content: Content,
     bounds: TerminalBounds,
     selection: Option<Selection>,
-    url_regex: Regex,
-    path_regex: Regex,
     /// Set once the cursor has reached the bottom row at least once,
     /// meaning real content has scrolled into the history buffer.
     scrollback_ready: bool,
@@ -350,8 +360,6 @@ impl Terminal {
             last_content: Content::default(),
             bounds,
             selection: None,
-            url_regex: Regex::new(r#"https?://[^\s<>\"{}|\\^`\[\]]+"#).unwrap(),
-            path_regex: Regex::new(r#"([a-zA-Z]:\\[^\s<>:"|?*]+|/[^\s<>:"|?*]+\.\w+)(?::(\d+))?(?::(\d+))?"#).unwrap(),
             scrollback_ready: false,
         }
     }
@@ -493,6 +501,11 @@ impl Terminal {
         self.update_content();
     }
 
+    pub fn scroll_down(&mut self, lines: i32) {
+        { let mut term = self.term.lock(); term.scroll_display(Scroll::Delta(-lines)); }
+        self.update_content();
+    }
+
     pub fn resize(&mut self, bounds: TerminalBounds) {
         self.bounds = bounds;
         let dimensions = TermDimensions { columns: bounds.num_columns(), screen_lines: bounds.num_lines() };
@@ -611,19 +624,18 @@ impl Terminal {
 
     pub fn find_hyperlink_at(&self, point: Point) -> Option<(String, bool)> {
         let content = self.get_content();
-        let mut line_text = String::new();
-        for cell in &content.cells {
-            if cell.point.line == point.line {
-                line_text.push(cell.cell.character);
-            }
-        }
-        for mat in self.url_regex.find_iter(&line_text) {
+        // Only iterate cells on the target line, not all cells
+        let line_text: String = content.cells.iter()
+            .filter(|c| c.point.line == point.line)
+            .map(|c| c.cell.character)
+            .collect();
+        for mat in url_regex().find_iter(&line_text) {
             let col = point.column;
             if col >= mat.start() && col < mat.end() {
                 return Some((mat.as_str().to_string(), true));
             }
         }
-        for mat in self.path_regex.find_iter(&line_text) {
+        for mat in path_regex().find_iter(&line_text) {
             let col = point.column;
             if col >= mat.start() && col < mat.end() {
                 return Some((mat.as_str().to_string(), false));

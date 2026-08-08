@@ -3,6 +3,7 @@
 use crate::persistence::TabState;
 use crate::terminal::{Terminal, TerminalBounds};
 use crate::pty::PtyProcess;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -15,6 +16,9 @@ pub struct Tab {
     pub selecting: bool,
     pub working_directory: Option<String>,
     pub process_exited: bool,
+    /// Shared flag to signal the reader thread to stop.
+    /// Set to true when the Tab is dropped.
+    shutdown: Arc<AtomicBool>,
 }
 
 impl Tab {
@@ -37,6 +41,7 @@ impl Tab {
         };
 
         let terminal = Arc::new(Mutex::new(Terminal::new(bounds)));
+        let shutdown = Arc::new(AtomicBool::new(false));
 
         let pty = match PtyProcess::new_with_cwd(cols, rows, working_dir.clone()) {
             Ok(pty) => Some(Arc::new(pty)),
@@ -49,12 +54,16 @@ impl Tab {
         if let Some(ref pty) = pty {
             let reader = pty.reader();
             let terminal_clone = terminal.clone();
+            let shutdown_clone = shutdown.clone();
             thread::spawn(move || {
                 let mut buffer = [0u8; 8192];
-                loop {
+                while !shutdown_clone.load(Ordering::Relaxed) {
                     match reader.read(&mut buffer) {
                         Ok(0) => break,
-                        Ok(n) => { terminal_clone.lock().unwrap().write_output(&buffer[..n]); }
+                        Ok(n) => {
+                            let _ = terminal_clone.lock().unwrap_or_else(|e| e.into_inner())
+                                .write_output(&buffer[..n]);
+                        }
                         Err(_) => break,
                     }
                 }
@@ -69,6 +78,7 @@ impl Tab {
             selecting: false,
             working_directory: None,
             process_exited: false,
+            shutdown,
         }
     }
 
@@ -85,6 +95,13 @@ impl Tab {
             title: self.title.clone(),
             working_directory: self.working_directory.clone(),
         }
+    }
+}
+
+impl Drop for Tab {
+    fn drop(&mut self) {
+        // Signal the reader thread to stop so it releases its Arc<Terminal>.
+        self.shutdown.store(true, Ordering::Relaxed);
     }
 }
 

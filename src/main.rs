@@ -104,7 +104,28 @@ struct ImeState {
 /// instead of tofu boxes. epaint panics on unparseable font data, so every
 /// candidate is validated before insertion.
 fn install_cjk_fonts(ctx: &egui::Context) {
-    const CANDIDATES: &[(&str, &str)] = &[
+    // Start with default font definitions
+    let mut fonts = egui::FontDefinitions::default();
+
+    // Load symbol font first (covers Dingbats ✻★▶, math symbols, etc.)
+    const SYMBOL_CANDIDATES: &[(&str, &str)] = &[
+        ("Segoe UI Symbol", "C:\\Windows\\Fonts\\seguisym.ttf"),
+        ("MS Gothic", "C:\\Windows\\Fonts\\msgothic.ttc"),
+    ];
+
+    for (name, path) in SYMBOL_CANDIDATES {
+        let Ok(bytes) = std::fs::read(path) else { continue };
+        if !is_font_file(&bytes) { continue; }
+        fonts.font_data.insert((*name).to_owned(), egui::FontData::from_owned(bytes));
+        for family in [egui::FontFamily::Monospace, egui::FontFamily::Proportional] {
+            fonts.families.entry(family).or_default().push((*name).to_owned());
+        }
+        log::info!("Loaded symbol font: {name} ({path})");
+        break;
+    }
+
+    // Load CJK font as fallback
+    const CJK_CANDIDATES: &[(&str, &str)] = &[
         ("Microsoft YaHei", "C:\\Windows\\Fonts\\msyh.ttc"),
         ("SimHei", "C:\\Windows\\Fonts\\simhei.ttf"),
         ("DengXian", "C:\\Windows\\Fonts\\Deng.ttf"),
@@ -112,22 +133,18 @@ fn install_cjk_fonts(ctx: &egui::Context) {
         ("KaiTi", "C:\\Windows\\Fonts\\simkai.ttf"),
     ];
 
-    for (name, path) in CANDIDATES {
+    for (name, path) in CJK_CANDIDATES {
         let Ok(bytes) = std::fs::read(path) else { continue };
-        if !is_font_file(&bytes) {
-            log::warn!("Skipping invalid font file: {path}");
-            continue;
-        }
-        let mut fonts = egui::FontDefinitions::default();
+        if !is_font_file(&bytes) { continue; }
         fonts.font_data.insert((*name).to_owned(), egui::FontData::from_owned(bytes));
         for family in [egui::FontFamily::Monospace, egui::FontFamily::Proportional] {
             fonts.families.entry(family).or_default().push((*name).to_owned());
         }
-        ctx.set_fonts(fonts);
         log::info!("Loaded CJK fallback font: {name} ({path})");
-        return;
+        break;
     }
-    log::warn!("No CJK font found - Chinese/Japanese/Korean text will render as boxes");
+
+    ctx.set_fonts(fonts);
 }
 
 /// Minimal sfnt/TTC magic-byte check (epaint panics on invalid font data).
@@ -221,7 +238,7 @@ impl TerminalApp {
 
     fn copy_selection(&mut self) {
         let term = self.panel.active_tab().map(|t| t.terminal.clone());
-        if let Some(text) = term.and_then(|t| t.lock().unwrap().copy_selection()) {
+        if let Some(text) = term.and_then(|t| t.lock().unwrap_or_else(|e| e.into_inner()).copy_selection()) {
             self.clipboard = Some(text.clone());
             if let Ok(mut clipboard) = arboard::Clipboard::new() {
                 let _ = clipboard.set_text(text);
@@ -237,7 +254,7 @@ impl TerminalApp {
         };
         if let (Some(text), Some(tab)) = (text, self.panel.active_tab()) {
             if let Some(ref pty) = tab.pty {
-                let content = tab.terminal.lock().unwrap();
+                let content = tab.terminal.lock().unwrap_or_else(|e| e.into_inner());
                 if content.get_content().mode.contains(Modes::BRACKETED_PASTE) {
                     let _ = pty.write(b"\x1b[200~");
                     let _ = pty.write(text.as_bytes());
@@ -266,7 +283,7 @@ impl TerminalApp {
                         // Ctrl+C - copy if selection exists, otherwise send interrupt
                         if key == egui::Key::C {
                             let has_selection = self.panel.active_tab()
-                                .map(|tab| tab.terminal.lock().unwrap().get_content().selection.is_some())
+                                .map(|tab| tab.terminal.lock().unwrap_or_else(|e| e.into_inner()).get_content().selection.is_some())
                                 .unwrap_or(false);
                             if has_selection {
                                 self.copy_selection();
@@ -345,7 +362,7 @@ impl eframe::App for TerminalApp {
         // Drain terminal events
         let mut needs_repaint = false;
         for tab in &mut self.panel.tabs {
-            let events = tab.terminal.lock().unwrap().drain_events();
+            let events = tab.terminal.lock().unwrap_or_else(|e| e.into_inner()).drain_events();
             for event in events {
                 match event {
                     TerminalEvent::Wakeup => needs_repaint = true,
@@ -371,7 +388,9 @@ impl eframe::App for TerminalApp {
             ctx.request_repaint();
         }
 
-        ctx.request_repaint_after(Duration::from_millis(50));
+        // Repaint at cursor blink interval (500ms) instead of every 50ms.
+        // The Wakeup event handler above already triggers repaints for PTY output.
+        ctx.request_repaint_after(Duration::from_millis(500));
 
         // Collect input events
         let mut events = Vec::new();
@@ -451,7 +470,7 @@ impl eframe::App for TerminalApp {
                     // positive delta = wheel up = scroll up through history.
                     let scroll_lines = (i.raw_scroll_delta.y / self.cell_height) as i32;
                     if let Some(tab) = self.panel.active_tab() {
-                        tab.terminal.lock().unwrap().scroll_up(scroll_lines);
+                        tab.terminal.lock().unwrap_or_else(|e| e.into_inner()).scroll_up(scroll_lines);
                     }
                 }
             }
@@ -486,9 +505,6 @@ impl eframe::App for TerminalApp {
 
         // Main terminal area - full screen terminal
         egui::CentralPanel::default().show(ctx, |ui| {
-            let Some(tab) = self.panel.active_tab() else { return; };
-            let content = tab.terminal.lock().unwrap().get_content().clone();
-
             let available_width = ui.available_width();
             let available_height = ui.available_height();
             let display_cols = (available_width / self.cell_width) as u16;
@@ -507,7 +523,7 @@ impl eframe::App for TerminalApp {
                 };
 
                 if let Some(tab) = self.panel.active_tab_mut() {
-                    tab.terminal.lock().unwrap().resize(new_bounds);
+                    tab.terminal.lock().unwrap_or_else(|e| e.into_inner()).resize(new_bounds);
                     if let Some(ref pty) = tab.pty {
                         let _ = pty.resize(display_cols, display_rows);
                     }
@@ -526,6 +542,14 @@ impl eframe::App for TerminalApp {
             // Batch rendering: group cells by line and render with LayoutJob
             use egui::text::{LayoutJob, LayoutSection};
             use egui::{TextFormat, FontId, Color32};
+
+            // Hold lock for rendering — avoids cloning the entire Content.
+            // The FairMutex allows concurrent reads; only scrollbar/selection
+            // interaction (below) needs write access and re-acquires the lock.
+            let display_offset = {
+            let Some(tab) = self.panel.active_tab() else { return; };
+            let term_guard = tab.terminal.lock().unwrap_or_else(|e| e.into_inner());
+            let content = term_guard.get_content();
 
             // Group cells by line (sorted Vec instead of HashMap — cells are already
             // ordered by line, so we can partition in one pass).
@@ -798,15 +822,20 @@ impl eframe::App for TerminalApp {
                 }
             }
 
+            // Save values needed after lock is released
+            content.display_offset
+            }; // end of lock scope
+
             // Scrollbar (right edge) — visible only when display_offset > 0
             // (user has scrolled back into history). total_lines() includes the
             // scrollback *capacity* (10k), so checking total > display_rows
             // would always be true and show the scrollbar at startup.
             {
-                let offset = content.display_offset;
+                let offset = display_offset;
 
                 if offset > 0 {
-                    let total = self.panel.active_tab().unwrap().terminal.lock().unwrap().total_lines();
+                    let Some(tab) = self.panel.active_tab() else { return; };
+                    let total = tab.terminal.lock().unwrap_or_else(|e| e.into_inner()).total_lines();
                     let track_x = rect.right() - 8.0;
                     let track_rect = egui::Rect::from_min_size(
                         egui::Pos2::new(track_x, rect.top()),
@@ -816,6 +845,7 @@ impl eframe::App for TerminalApp {
                     painter.rect_filled(track_rect, 0.0, egui::Color32::from_rgba_premultiplied(60, 60, 60, 180));
 
                     let max_offset = (total - display_rows as usize) as f32;
+                    if max_offset <= 0.0 { return; }
                     let thumb_h = (rect.height() * display_rows as f32 / total as f32).max(20.0);
                     let thumb_y = rect.top() + (rect.height() - thumb_h) * (1.0 - offset as f32 / max_offset);
                     let thumb_rect = egui::Rect::from_min_size(
@@ -835,7 +865,7 @@ impl eframe::App for TerminalApp {
                                 let delta = target_offset as i32 - offset as i32;
                                 if delta != 0 {
                                     if let Some(tab) = self.panel.active_tab_mut() {
-                                        tab.terminal.lock().unwrap().scroll_up(delta);
+                                        tab.terminal.lock().unwrap_or_else(|e| e.into_inner()).scroll_up(delta);
                                     }
                                 }
                             }
@@ -852,9 +882,9 @@ impl eframe::App for TerminalApp {
                                     let page = display_rows as i32;
                                     if let Some(tab) = self.panel.active_tab_mut() {
                                         if pos.y < thumb_rect.top() {
-                                            tab.terminal.lock().unwrap().scroll_up(page);
+                                            tab.terminal.lock().unwrap_or_else(|e| e.into_inner()).scroll_up(page);
                                         } else {
-                                            tab.terminal.lock().unwrap().scroll_up(-page);
+                                            tab.terminal.lock().unwrap_or_else(|e| e.into_inner()).scroll_up(-page);
                                         }
                                     }
                                 }
@@ -874,18 +904,20 @@ impl eframe::App for TerminalApp {
 
                     // Clear any existing selection when clicking
                     if let Some(tab) = self.panel.active_tab_mut() {
-                        tab.terminal.lock().unwrap().clear_selection();
+                        tab.terminal.lock().unwrap_or_else(|e| e.into_inner()).clear_selection();
                     }
 
                     // Check for hyperlink click-to-open
                     if let Some(pos) = response.interact_pointer_pos() {
-                        let point = self.pixel_to_point(pos, origin, content.display_offset);
-                        let term = self.panel.active_tab().unwrap().terminal.lock().unwrap();
-                        if let Some((url, is_url)) = term.find_hyperlink_at(point) {
-                            if is_url {
-                                hyperlinks::open_url(&url);
-                            } else {
-                                hyperlinks::open_path(&url, None, None);
+                        let point = self.pixel_to_point(pos, origin, display_offset);
+                        if let Some(tab) = self.panel.active_tab() {
+                            let term = tab.terminal.lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some((url, is_url)) = term.find_hyperlink_at(point) {
+                                if is_url {
+                                    hyperlinks::open_url(&url);
+                                } else {
+                                    hyperlinks::open_path(&url, None, None);
+                                }
                             }
                         }
                     }
@@ -893,13 +925,14 @@ impl eframe::App for TerminalApp {
                 // Double click - select word
                 if response.double_clicked() {
                     if let Some(pos) = response.interact_pointer_pos() {
-                        let point = self.pixel_to_point(pos, origin, content.display_offset);
+                        let point = self.pixel_to_point(pos, origin, display_offset);
                         if let Some(tab) = self.panel.active_tab_mut() {
-                            tab.terminal.lock().unwrap().start_selection(point, SelectionType::Semantic);
-                            // Copy selected word to clipboard
-                            let term = tab.terminal.lock().unwrap();
+                            // Hold lock once for both selection and copy to avoid TOCTOU
+                            let mut term = tab.terminal.lock().unwrap_or_else(|e| e.into_inner());
+                            term.start_selection(point, SelectionType::Semantic);
                             if let Some(text) = term.copy_selection() {
                                 if !text.is_empty() {
+                                    drop(term);
                                     self.clipboard = Some(text.clone());
                                     if let Ok(mut clipboard) = arboard::Clipboard::new() {
                                         let _ = clipboard.set_text(text);
@@ -912,13 +945,14 @@ impl eframe::App for TerminalApp {
                 // Triple click - select line
                 if response.triple_clicked() {
                     if let Some(pos) = response.interact_pointer_pos() {
-                        let point = self.pixel_to_point(pos, origin, content.display_offset);
+                        let point = self.pixel_to_point(pos, origin, display_offset);
                         if let Some(tab) = self.panel.active_tab_mut() {
-                            tab.terminal.lock().unwrap().start_selection(point, SelectionType::Lines);
-                            // Copy selected line to clipboard
-                            let term = tab.terminal.lock().unwrap();
+                            // Hold lock once for both selection and copy to avoid TOCTOU
+                            let mut term = tab.terminal.lock().unwrap_or_else(|e| e.into_inner());
+                            term.start_selection(point, SelectionType::Lines);
                             if let Some(text) = term.copy_selection() {
                                 if !text.is_empty() {
+                                    drop(term);
                                     self.clipboard = Some(text.clone());
                                     if let Ok(mut clipboard) = arboard::Clipboard::new() {
                                         let _ = clipboard.set_text(text);
@@ -931,10 +965,10 @@ impl eframe::App for TerminalApp {
                 // Drag - select text
                 if response.drag_started() {
                     if let Some(pos) = response.interact_pointer_pos() {
-                        let point = self.pixel_to_point(pos, origin, content.display_offset);
+                        let point = self.pixel_to_point(pos, origin, display_offset);
                         if let Some(tab) = self.panel.active_tab_mut() {
                             tab.selecting = true;
-                            tab.terminal.lock().unwrap().start_selection(point, SelectionType::Simple);
+                            tab.terminal.lock().unwrap_or_else(|e| e.into_inner()).start_selection(point, SelectionType::Simple);
                         }
                     }
                 }
@@ -942,9 +976,27 @@ impl eframe::App for TerminalApp {
                     let selecting = self.panel.active_tab().map_or(false, |t| t.selecting);
                     if selecting {
                         if let Some(pos) = response.interact_pointer_pos() {
-                            let point = self.pixel_to_point(pos, origin, content.display_offset);
-                            if let Some(tab) = self.panel.active_tab_mut() {
-                                tab.terminal.lock().unwrap().update_selection(point);
+                            // Auto-scroll when dragging above/below viewport
+                            let viewport_top = origin.y;
+                            let viewport_bottom = origin.y + display_rows as f32 * self.cell_height;
+                            if pos.y < viewport_top {
+                                // Mouse above viewport — scroll up
+                                if let Some(tab) = self.panel.active_tab_mut() {
+                                    tab.terminal.lock().unwrap_or_else(|e| e.into_inner()).scroll_up(1);
+                                }
+                            } else if pos.y > viewport_bottom {
+                                // Mouse below viewport — scroll down
+                                if let Some(tab) = self.panel.active_tab_mut() {
+                                    tab.terminal.lock().unwrap_or_else(|e| e.into_inner()).scroll_down(1);
+                                }
+                            }
+                            // Re-read display_offset after potential scroll
+                            if let Some(tab) = self.panel.active_tab() {
+                                let current_offset = tab.terminal.lock().unwrap_or_else(|e| e.into_inner()).get_content().display_offset;
+                                let point = self.pixel_to_point(pos, origin, current_offset);
+                                if let Some(tab) = self.panel.active_tab_mut() {
+                                    tab.terminal.lock().unwrap_or_else(|e| e.into_inner()).update_selection(point);
+                                }
                             }
                         }
                     }
@@ -953,7 +1005,7 @@ impl eframe::App for TerminalApp {
                     if let Some(tab) = self.panel.active_tab_mut() {
                         tab.selecting = false;
                         // Copy-on-select: automatically copy selected text
-                        let term = tab.terminal.lock().unwrap();
+                        let term = tab.terminal.lock().unwrap_or_else(|e| e.into_inner());
                         if let Some(text) = term.copy_selection() {
                             if !text.is_empty() {
                                 self.clipboard = Some(text.clone());
